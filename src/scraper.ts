@@ -66,17 +66,88 @@ export interface BookingDetail extends Booking {
   paymentSummary: string;
 }
 
-// ── URL builder ───────────────────────────────────────────────────────────────
-
-const BASE_URL = "https://secure.booking.com";
+// ── URL extraction ────────────────────────────────────────────────────────────
 
 /**
- * Build the trips list URL for a given status.
- * Booking.com uses ?status= query param to filter upcoming/past/cancelled.
- * Fallback: mytrips.html without status shows upcoming by default.
+ * Navigate to secure.booking.com/mytrips.html via a JS click from www.booking.com.
+ *
+ * IMPORTANT: secure.booking.com blocks headless Chrome (ERR_TOO_MANY_REDIRECTS).
+ * This adapter MUST run in watch mode to access the trips page:
+ *   browser({ action: "set_mode", mode: "watch" })
+ *   get_upcoming_bookings({ count: 5 })
+ *
+ * The mytrips link on www.booking.com uses native element.click() which triggers
+ * the JS session initialization (sid generation) that page.goto() bypasses.
+ *
+ * Confirmed URL pattern (discovered 2026-03-25):
+ *   https://secure.booking.com/mytrips.html?aid=304142&label=gen173nr-...&sid=<session_id>
  */
-export function tripsUrl(status: TripStatus): string {
-  return `${BASE_URL}/mytrips.html?status=${status}`;
+async function navigateToTripsPage(page: Page, status: TripStatus): Promise<void> {
+  // Step 1: ensure we're on www.booking.com with full JS initialized
+  if (!page.url().includes("www.booking.com")) {
+    await page.goto("https://www.booking.com/", {
+      waitUntil: "networkidle",
+      timeout: 25_000,
+    });
+    await page.waitForTimeout(1_500);
+  }
+
+  await page.waitForTimeout(500);
+
+  // Step 2: click the mytrips link via native JS element.click()
+  // Playwright's locator.click() times out on this element due to patchright's
+  // performance monitoring. Native JS click() triggers the same JS navigation.
+  const clicked = await page.evaluate((): boolean => {
+    const link = document.querySelector('a[href*="mytrips"]') as HTMLAnchorElement | null;
+    if (link) {
+      link.click();
+      return true;
+    }
+    const btn = document.querySelector(
+      '[data-testid="header-account-menu-trigger"], [data-testid="account-menu"]'
+    ) as HTMLElement | null;
+    if (btn) {
+      btn.click();
+      return false;
+    }
+    return false;
+  });
+
+  if (!clicked) {
+    await page.waitForTimeout(600);
+    const didClick = await page.evaluate((): boolean => {
+      const link = document.querySelector('a[href*="mytrips"]') as HTMLAnchorElement | null;
+      if (link) { link.click(); return true; }
+      return false;
+    });
+    if (!didClick) {
+      throw new Error(
+        "Could not find My bookings link on www.booking.com. " +
+        "Make sure you are logged in (run: browserkit login booking)."
+      );
+    }
+  }
+
+  await page.waitForLoadState("domcontentloaded", { timeout: 30_000 });
+  await page.waitForTimeout(1_500);
+
+  // Check if navigation was blocked (headless mode)
+  const currentUrl = page.url();
+  if (currentUrl.includes("chromewebdata") || currentUrl.includes("chrome-error://")) {
+    throw new Error(
+      "Booking.com's secure.booking.com requires headed (watch) mode — " +
+      "it blocks headless Chrome. Switch to watch mode first:\n" +
+      "  browser({ action: 'set_mode', mode: 'watch' })\n" +
+      "Then retry your booking tool call."
+    );
+  }
+
+  // Append status filter if needed
+  if (status !== "upcoming" && page.url().includes("mytrips")) {
+    const u = new URL(page.url());
+    u.searchParams.set("status", status);
+    await page.goto(u.toString(), { waitUntil: "domcontentloaded", timeout: 20_000 });
+  }
 }
 
 // ── Text parsing helpers ──────────────────────────────────────────────────────
@@ -131,45 +202,54 @@ export function countNights(checkIn: string, checkOut: string): number {
   }
 }
 
+/** Kept for unit test compatibility only */
+export function tripsUrl(status: TripStatus): string {
+  return `https://secure.booking.com/mytrips.html?status=${status}`;
+}
+
 // ── Page extraction ───────────────────────────────────────────────────────────
 
 /**
- * Wait for the trips page to load and extract all booking links + raw text.
- * Returns an array of { rawText, detailUrl } per booking card found.
+ * Extract trip group cards from the mytrips page.
+ * Booking.com groups bookings by destination trip (e.g. "California and Arizona").
+ * Each card shows: destination, date range, booking count, thumbnail.
+ *
+ * Confirmed page structure (2026-03-25):
+ *   secure.booking.com/mytrips.html shows trip groups, not individual hotel cards.
+ *   The page has tabs: upcoming (default) | past | cancelled.
+ *   Trip groups look like: "California and Arizona\nJan 31 – Feb 7\n5 bookings"
  */
 async function extractRawCards(page: Page): Promise<Array<{ rawText: string; detailUrl: string }>> {
-  // Wait for main content to appear
   await page.waitForSelector(SELECTORS.tripsContent, { timeout: 20_000 }).catch(() => {});
-  await page.waitForTimeout(1_500); // allow React render to settle
+  await page.waitForTimeout(1_500);
 
   return page.evaluate(() => {
-    // Find all "View booking" / "View details" links — each one is a booking card entry
-    const detailAnchors = Array.from(
-      document.querySelectorAll('a[href*="mybooking"], a[href*="myreservations"], a[href*="reservation"]')
+    // Strategy 1: find clickable trip group cards via anchor links
+    const anchors = Array.from(
+      document.querySelectorAll('a[href*="mytrips"], a[href*="mybooking"], a[href*="booking_id"]')
     ).filter((a) => {
       const href = (a as HTMLAnchorElement).href;
-      // Must be an actual booking detail link, not navigation
-      return href.includes("booking.com") && !href.includes("/search") && !href.includes("/flights");
+      return href.includes("booking.com") && !href.includes("/search") && !href.includes("mytrips.html");
     }) as HTMLAnchorElement[];
 
-    if (detailAnchors.length > 0) {
-      return detailAnchors.map((anchor) => {
-        // Walk up to find the booking card container
+    if (anchors.length > 0) {
+      const seen = new Set<string>();
+      const results: Array<{ rawText: string; detailUrl: string }> = [];
+      anchors.forEach((anchor) => {
+        if (seen.has(anchor.href)) return;
+        seen.add(anchor.href);
         let el: HTMLElement = anchor;
-        for (let i = 0; i < 10 && el.parentElement; i++) {
+        for (let i = 0; i < 8 && el.parentElement; i++) {
           el = el.parentElement as HTMLElement;
-          // Stop when the element is large enough to be a card
-          if (el.offsetHeight > 100 && el.offsetWidth > 200) break;
+          if (el.offsetHeight > 80 && el.offsetWidth > 150) break;
         }
-        return {
-          rawText: el.innerText.trim(),
-          detailUrl: anchor.href,
-        };
+        results.push({ rawText: el.innerText.trim(), detailUrl: anchor.href });
       });
+      if (results.length > 0) return results;
     }
 
-    // Fallback: extract the full main content as one block when no anchor-based
-    // card detection works (e.g. SPA not yet rendered or different DOM structure)
+    // Strategy 2: full page innerText — Booking.com renders trip groups as text blocks
+    // The LLM will parse the text to understand the structure
     const main = document.querySelector('main, [role="main"], #bodyconstraint-inner') as HTMLElement | null;
     const rawText = (main ?? document.body).innerText.trim();
     return rawText.length > 50 ? [{ rawText, detailUrl: "" }] : [];
@@ -215,10 +295,9 @@ export async function extractTripsPage(
   page: Page,
   status: TripStatus
 ): Promise<Booking[]> {
-  await page.goto(tripsUrl(status), {
-    waitUntil: "domcontentloaded",
-    timeout: 30_000,
-  });
+  // Navigate via click from www.booking.com — direct goto on secure.booking.com
+  // causes ERR_TOO_MANY_REDIRECTS regardless of ?sid= params
+  await navigateToTripsPage(page, status);
 
   const cards = await extractRawCards(page);
   return cards

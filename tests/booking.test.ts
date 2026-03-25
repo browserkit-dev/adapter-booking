@@ -26,8 +26,9 @@ describe("Booking adapter metadata", () => {
     expect(adapter.domain).toBe("booking.com");
   });
 
-  it("loginUrl points to secure.booking.com", () => {
-    expect(adapter.loginUrl).toContain("secure.booking.com");
+  it("loginUrl points to booking.com", () => {
+    expect(adapter.loginUrl).toContain("booking.com");
+    expect(adapter.loginUrl).toContain("www.booking.com");
   });
 
   it("exports selectors for health_check", () => {

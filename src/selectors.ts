@@ -9,13 +9,26 @@
  *   2. Waiting for page readiness before extracting innerText
  *
  * Auth flows span two subdomains:
- *   - secure.booking.com  — My trips, reservation management
- *   - account.booking.com — OAuth / login flows
+ *   - www.booking.com       — main homepage, session cookies work here
+ *   - secure.booking.com    — booking management (requires ?sid= query param)
+ *   - account.booking.com   — OAuth / login flows
+ *
+ * KEY FINDING (discovered 2026-03-25):
+ * Session cookies captured during login work on www.booking.com only.
+ * secure.booking.com requires the ?sid=... query parameter in the URL.
+ * The correct trips URL includes the sid:
+ *   https://secure.booking.com/mytrips.html?sid=<sid>&aid=304142
+ * The sid is found in the href of the "My bookings" link on www.booking.com.
+ * loginUrl must be www.booking.com — navigate there first, then follow the mytrips link.
  *
  * TODO: After first login, inspect the detail page URL pattern and add a
  * comment here documenting the confirmed URL scheme for booking details.
- * Likely: secure.booking.com/mybooking.html?confirmation_id=...
- * or:     secure.booking.com/myreservations.html?bn=...&pin=...
+ * Confirmed trips URL (2026-03-25):
+ *   https://secure.booking.com/mytrips.html?aid=304142&label=gen173nr-...&sid=<session_id>
+ * The sid param is generated client-side by Booking.com's JS from in-memory session data.
+ * Navigation must happen via element.click() from www.booking.com (not page.goto()).
+ * secure.booking.com blocks headless Chrome — adapter requires watch mode:
+ *   browser({ action: "set_mode", mode: "watch" }) before calling booking tools.
  */
 
 export const SELECTORS = {

@@ -22,9 +22,10 @@ const detailSchema = z.object({
 export default defineAdapter({
   site: "booking",
   domain: "booking.com",
-  // loginUrl is where the framework navigates when page is about:blank
-  // secure.booking.com/mytrips.html redirects to login if not authenticated
-  loginUrl: "https://secure.booking.com/mytrips.html",
+  // www.booking.com is the only domain where captured session cookies work.
+  // secure.booking.com requires a ?sid= query param that is embedded in the
+  // mytrips link on the homepage — see extractTripsPage in scraper.ts.
+  loginUrl: "https://www.booking.com",
   selectors: { accountMenu: SELECTORS.accountMenu },
   rateLimit: { minDelayMs: 3_000 },
 
@@ -32,25 +33,21 @@ export default defineAdapter({
     try {
       const url = page.url();
 
-      // Redirected to login or OAuth flow = not logged in
-      if (
-        url.includes("/login") ||
-        url.includes("account.booking.com/auth") ||
-        url.includes("account.booking.com/sign-in")
-      ) {
-        return false;
-      }
+      // Redirected to sign-in = not logged in
+      if (url.includes("/sign-in") || url.includes("/login")) return false;
 
-      // If there's a login form on the page = not logged in
+      // Must be on booking.com domain
+      if (!url.includes("booking.com")) return false;
+
+      // Primary check: account menu with username — only present when logged in.
+      // Confirmed working: shows "Jonathan Zarecki / Genius Level 3" when authenticated.
+      const hasAccountMenu = await page.locator(SELECTORS.accountMenu).count();
+      if (hasAccountMenu > 0) return true;
+
+      // Fallback: not on a login form
       const hasLoginForm = await page.locator(SELECTORS.loginForm).count();
       if (hasLoginForm > 0) return false;
 
-      // Must be on the secure domain with content
-      const onSecureDomain =
-        url.includes("secure.booking.com") || url.includes("account.booking.com");
-      if (!onSecureDomain) return false;
-
-      // Verify page has real content (not a blank SPA shell)
       const bodyText = await page
         .evaluate(() => document.body?.innerText?.trim() ?? "")
         .catch(() => "");
