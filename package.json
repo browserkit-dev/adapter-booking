@@ -1,0 +1,35 @@
+{
+  "name": "@browserkit/adapter-booking",
+  "version": "0.1.0",
+  "description": "Booking.com adapter for browserkit — upcoming bookings, past trips, booking details",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "lint": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@browserkit/core": ">=0.1.0"
+  },
+  "devDependencies": {
+    "@browserkit/core": "file:../session-mcp/packages/core",
+    "@types/node": "^22.13.14",
+    "patchright": "^1.51.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.9",
+    "zod": "^3.24.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
