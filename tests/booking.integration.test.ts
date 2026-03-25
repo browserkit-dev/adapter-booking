@@ -1,35 +1,41 @@
 /**
  * L2 — Live Integration Tests
  *
- * Tests against real secure.booking.com — requires authentication.
- * Run ONLY locally after: browserkit login booking
+ * Tests against real secure.booking.com — requires authentication AND watch mode.
+ * Run ONLY locally after:
+ *   1. browserkit login booking
+ *   2. browserkit start --config browserkit.config.js  (daemon running on port 52745)
  *
  * Usage: pnpm test:integration
  *
- * These tests are excluded from CI because:
- *   1. They require a real Booking.com account session
- *   2. Booking.com uses Cloudflare + fingerprinting (blocks CI IPs)
- *   3. They expose personal booking data
+ * IMPORTANT: secure.booking.com blocks headless Chrome. These tests connect to
+ * the running daemon and switch to watch mode automatically.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import bookingAdapter from "../src/index.js";
-import { createTestAdapterServer, type TestAdapterServer } from "@browserkit/core/testing";
 import { createTestMcpClient, type TestMcpClient } from "@browserkit/core/testing";
 import type { Booking, BookingDetail } from "../src/scraper.js";
 
-// ── Shared server ─────────────────────────────────────────────────────────────
+// Connect to the running daemon (not a fresh test server — needs real auth)
+const MCP_URL = process.env["BOOKING_MCP_URL"] ?? "http://127.0.0.1:52745/mcp";
 
-let server: TestAdapterServer;
+// ── Shared client ─────────────────────────────────────────────────────────────
+
 let client: TestMcpClient;
 
 beforeAll(async () => {
-  server = await createTestAdapterServer(bookingAdapter);
-  client = await createTestMcpClient(server.url);
+  client = await createTestMcpClient(MCP_URL);
+
+  // Switch to watch mode — required for secure.booking.com access
+  await client.callTool("browser", { action: "set_mode", mode: "watch" });
+
+  // Navigate to www.booking.com (where session cookies work)
+  await client.callTool("browser", { action: "navigate", url: "https://www.booking.com/" });
 }, 30_000);
 
 afterAll(async () => {
+  // Switch back to headless when done
+  await client.callTool("browser", { action: "set_mode", mode: "headless" }).catch(() => {});
   await client.close();
-  await server.stop();
 });
 
 // ── Auth check ────────────────────────────────────────────────────────────────
@@ -44,8 +50,10 @@ describe("auth", () => {
 
     if (!status.loggedIn) {
       throw new Error(
-        "Not logged in to Booking.com. Run: browserkit login booking\n" +
-        "Then restart the test server and re-run this suite."
+        "Not logged in to Booking.com.\n" +
+        "1. Run: browserkit login booking\n" +
+        "2. Start the daemon: browserkit start --config browserkit.config.js\n" +
+        "3. Re-run: pnpm test:integration"
       );
     }
 
