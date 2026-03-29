@@ -44,17 +44,23 @@ browserkit start --config browserkit.config.js
 
 Connect your MCP client to `http://127.0.0.1:3850/mcp`.
 
-## Important: Watch mode required
+## Important: CloakBrowser required for account tools
 
-`secure.booking.com` (where the trips page lives) **blocks headless Chrome**. Before calling any booking tool, switch the browser to watch mode:
+`secure.booking.com` (where your bookings live) is protected by **DataDome** bot detection — it blocks standard headless Chrome. The booking adapter uses **CloakBrowser** (stealth Chromium with 33 C++-level patches) to bypass this.
 
+Configure your `browserkit.config.js`:
+
+```javascript
+"/path/to/browserkit-adapter-booking/dist/index.js": {
+  port: 3850,
+  // Do NOT use channel: "chrome" — CloakBrowser uses its own Chromium binary
+  antiDetection: {
+    useCloakBrowser: true,
+  },
+},
 ```
-browser({ action: "set_mode", mode: "watch" })
-get_upcoming_bookings({ count: 5 })
-browser({ action: "set_mode", mode: "headless" })  // optional: restore headless
-```
 
-This opens a Chrome window that stays visible while the tools run. This is a Booking.com server-side restriction — even real Chrome with the correct session cookies gets `ERR_TOO_MANY_REDIRECTS` in headless mode.
+CloakBrowser downloads its Chromium binary (~140MB) on first run and caches it. All tools work fully headlessly — **no watch mode required**.
 
 ## Usage
 
