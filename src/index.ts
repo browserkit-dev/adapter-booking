@@ -2,7 +2,7 @@ import { defineAdapter } from "@browserkit/core";
 import { z } from "zod";
 import type { Page } from "patchright";
 import { SELECTORS } from "./selectors.js";
-import { extractTripsPage, extractBookingDetail } from "./scraper.js";
+import { extractTripsPage, extractBookingDetail, extractSearchResults, extractPropertyPage } from "./scraper.js";
 
 // ── Schemas ───────────────────────────────────────────────────────────────────
 
@@ -148,6 +148,158 @@ export default defineAdapter({
         }
 
         const detail = await extractBookingDetail(page, match.detailUrl, match);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(detail, null, 2) }],
+        };
+      },
+    },
+
+    // ── search_hotels ────────────────────────────────────────────────────────
+    {
+      name: "search_hotels",
+      description: [
+        "Search Booking.com for hotels and accommodations.",
+        "Works in headless mode — no watch mode required.",
+        "",
+        "Returns a list of properties with name, rating, location, price, and URL.",
+        "Pass propertyUrl to get_property for full details, or get_availability for room prices.",
+        "",
+        "Examples:",
+        "  search_hotels({ destination: 'Amsterdam', checkin: '2026-06-01', checkout: '2026-06-04' })",
+        "  search_hotels({ destination: 'Paris', checkin: '2026-07-10', checkout: '2026-07-14', adults: 2, sort: 'price' })",
+      ].join("\n"),
+      inputSchema: z.object({
+        destination: z.string().min(1).describe("City, neighborhood, hotel name, or landmark"),
+        checkin: z.string().describe("Check-in date (YYYY-MM-DD)"),
+        checkout: z.string().describe("Check-out date (YYYY-MM-DD)"),
+        adults: z.number().int().min(1).max(30).default(2).describe("Number of adults"),
+        rooms: z.number().int().min(1).max(30).default(1).describe("Number of rooms"),
+        count: z.number().int().min(1).max(25).default(10).describe("Max results to return"),
+        sort: z.enum(["popularity", "price", "review_score", "distance"]).default("popularity").optional()
+          .describe("Sort order: popularity (default), price, review_score, distance"),
+      }),
+      annotations: { readOnlyHint: true as const, openWorldHint: true as const },
+      async handler(page: Page, input: unknown) {
+        const { destination, checkin, checkout, adults, rooms, count, sort } = z.object({
+          destination: z.string(),
+          checkin: z.string(),
+          checkout: z.string(),
+          adults: z.number().default(2),
+          rooms: z.number().default(1),
+          count: z.number().default(10),
+          sort: z.enum(["popularity", "price", "review_score", "distance"]).default("popularity").optional(),
+        }).parse(input);
+
+        const params = new URLSearchParams({
+          ss: destination,
+          checkin,
+          checkout,
+          group_adults: String(adults),
+          no_rooms: String(rooms),
+          order: sort ?? "popularity",
+        });
+
+        const url = `https://www.booking.com/searchresults.html?${params.toString()}`;
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25_000 });
+        await page.waitForTimeout(2_000); // allow React to render results
+
+        const results = await extractSearchResults(page, count);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }],
+        };
+      },
+    },
+
+    // ── get_property ─────────────────────────────────────────────────────────
+    {
+      name: "get_property",
+      description: [
+        "Get full details for a Booking.com property: name, rating, location, amenities, and reviews.",
+        "Works in headless mode — no watch mode required.",
+        "",
+        "Use search_hotels first to get a property URL, then pass it here.",
+        "Include checkin/checkout to also see room types and prices.",
+        "",
+        "Returns: { name, rating, location, description, amenities, reviewSummary, roomOptions, rawText }",
+        "",
+        "Examples:",
+        "  get_property({ property_url: 'https://www.booking.com/hotel/nl/...', checkin: '2026-06-01', checkout: '2026-06-04' })",
+      ].join("\n"),
+      inputSchema: z.object({
+        property_url: z.string().url().describe("Full Booking.com hotel URL from search_hotels"),
+        checkin: z.string().optional().describe("Check-in date (YYYY-MM-DD) — include for room prices"),
+        checkout: z.string().optional().describe("Check-out date (YYYY-MM-DD)"),
+        adults: z.number().int().min(1).max(30).default(2).optional().describe("Number of adults"),
+      }),
+      annotations: { readOnlyHint: true as const, openWorldHint: true as const },
+      async handler(page: Page, input: unknown) {
+        const { property_url, checkin, checkout, adults } = z.object({
+          property_url: z.string().url(),
+          checkin: z.string().optional(),
+          checkout: z.string().optional(),
+          adults: z.number().default(2).optional(),
+        }).parse(input);
+
+        let url = property_url;
+        if (checkin && checkout) {
+          const u = new URL(property_url);
+          u.searchParams.set("checkin", checkin);
+          u.searchParams.set("checkout", checkout);
+          u.searchParams.set("group_adults", String(adults ?? 2));
+          url = u.toString();
+        }
+
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25_000 });
+        await page.waitForTimeout(2_000);
+
+        const detail = await extractPropertyPage(page);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(detail, null, 2) }],
+        };
+      },
+    },
+
+    // ── get_availability ─────────────────────────────────────────────────────
+    {
+      name: "get_availability",
+      description: [
+        "Get available rooms and prices for a specific Booking.com property on given dates.",
+        "Works in headless mode — no watch mode required.",
+        "",
+        "Use search_hotels to find properties, then this tool for room options and pricing.",
+        "",
+        "Returns the same shape as get_property but with roomOptions populated.",
+        "",
+        "Examples:",
+        "  get_availability({ property_url: 'https://www.booking.com/hotel/nl/...', checkin: '2026-06-01', checkout: '2026-06-04', adults: 2 })",
+      ].join("\n"),
+      inputSchema: z.object({
+        property_url: z.string().url().describe("Full Booking.com hotel URL from search_hotels"),
+        checkin: z.string().describe("Check-in date (YYYY-MM-DD)"),
+        checkout: z.string().describe("Check-out date (YYYY-MM-DD)"),
+        adults: z.number().int().min(1).max(30).default(2).describe("Number of adults"),
+        rooms: z.number().int().min(1).max(10).default(1).optional().describe("Number of rooms"),
+      }),
+      annotations: { readOnlyHint: true as const, openWorldHint: true as const },
+      async handler(page: Page, input: unknown) {
+        const { property_url, checkin, checkout, adults, rooms } = z.object({
+          property_url: z.string().url(),
+          checkin: z.string(),
+          checkout: z.string(),
+          adults: z.number().default(2),
+          rooms: z.number().default(1).optional(),
+        }).parse(input);
+
+        const u = new URL(property_url);
+        u.searchParams.set("checkin", checkin);
+        u.searchParams.set("checkout", checkout);
+        u.searchParams.set("group_adults", String(adults));
+        if (rooms && rooms > 1) u.searchParams.set("no_rooms", String(rooms));
+
+        await page.goto(u.toString(), { waitUntil: "domcontentloaded", timeout: 25_000 });
+        await page.waitForTimeout(2_000);
+
+        const detail = await extractPropertyPage(page);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(detail, null, 2) }],
         };

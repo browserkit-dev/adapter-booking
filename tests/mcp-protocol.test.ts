@@ -35,6 +35,9 @@ describe("tool registry", () => {
     expect(names).toContain("get_upcoming_bookings");
     expect(names).toContain("get_past_bookings");
     expect(names).toContain("get_booking_details");
+    expect(names).toContain("search_hotels");
+    expect(names).toContain("get_property");
+    expect(names).toContain("get_availability");
   });
 
   it("includes auto-registered browser management tool", async () => {

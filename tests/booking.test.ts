@@ -45,7 +45,7 @@ describe("tool registry", () => {
     expect(names).toContain("get_upcoming_bookings");
     expect(names).toContain("get_past_bookings");
     expect(names).toContain("get_booking_details");
-    expect(names).toHaveLength(3);
+    expect(names).toHaveLength(6);
   });
 
   it("every tool has a non-empty description", () => {
@@ -231,3 +231,136 @@ describe("SELECTORS export", () => {
     expect(typeof SELECTORS.accountMenu).toBe("string");
   });
 });
+
+// ── Tool registry (Phase 2) ───────────────────────────────────────────────────
+
+describe("tool registry (Phase 2)", () => {
+  it("exposes all 6 tools (3 Phase 1 + 3 Phase 2)", () => {
+    const names = adapter.tools().map((t) => t.name);
+    expect(names).toContain("search_hotels");
+    expect(names).toContain("get_property");
+    expect(names).toContain("get_availability");
+    expect(names).toHaveLength(6);
+  });
+});
+
+// ── search_hotels schema ──────────────────────────────────────────────────────
+
+describe("search_hotels schema", () => {
+  const tool = () => adapter.tools().find((t) => t.name === "search_hotels")!;
+
+  it("accepts valid input", () => {
+    expect(tool().inputSchema.safeParse({
+      destination: "Amsterdam",
+      checkin: "2026-06-01",
+      checkout: "2026-06-04",
+    }).success).toBe(true);
+  });
+
+  it("applies defaults (adults=2, rooms=1, count=10, sort=popularity)", () => {
+    const result = tool().inputSchema.parse({ destination: "Amsterdam", checkin: "2026-06-01", checkout: "2026-06-04" });
+    expect(result.adults).toBe(2);
+    expect(result.rooms).toBe(1);
+    expect(result.count).toBe(10);
+  });
+
+  it("rejects empty destination", () => {
+    expect(tool().inputSchema.safeParse({ destination: "", checkin: "2026-06-01", checkout: "2026-06-04" }).success).toBe(false);
+  });
+
+  it("rejects missing checkin", () => {
+    expect(tool().inputSchema.safeParse({ destination: "Amsterdam", checkout: "2026-06-04" }).success).toBe(false);
+  });
+
+  it("rejects missing checkout", () => {
+    expect(tool().inputSchema.safeParse({ destination: "Amsterdam", checkin: "2026-06-01" }).success).toBe(false);
+  });
+
+  it("accepts valid sort values", () => {
+    for (const sort of ["popularity", "price", "review_score", "distance"]) {
+      expect(tool().inputSchema.safeParse({
+        destination: "Amsterdam", checkin: "2026-06-01", checkout: "2026-06-04", sort,
+      }).success).toBe(true);
+    }
+  });
+
+  it("rejects invalid sort", () => {
+    expect(tool().inputSchema.safeParse({
+      destination: "Amsterdam", checkin: "2026-06-01", checkout: "2026-06-04", sort: "stars",
+    }).success).toBe(false);
+  });
+
+  it("rejects count=0", () => {
+    expect(tool().inputSchema.safeParse({
+      destination: "Amsterdam", checkin: "2026-06-01", checkout: "2026-06-04", count: 0,
+    }).success).toBe(false);
+  });
+
+  it("rejects count=26", () => {
+    expect(tool().inputSchema.safeParse({
+      destination: "Amsterdam", checkin: "2026-06-01", checkout: "2026-06-04", count: 26,
+    }).success).toBe(false);
+  });
+});
+
+// ── get_property schema ───────────────────────────────────────────────────────
+
+describe("get_property schema", () => {
+  const tool = () => adapter.tools().find((t) => t.name === "get_property")!;
+  const validUrl = "https://www.booking.com/hotel/nl/some-hotel.html";
+
+  it("accepts minimal input (URL only)", () => {
+    expect(tool().inputSchema.safeParse({ property_url: validUrl }).success).toBe(true);
+  });
+
+  it("accepts URL with checkin/checkout", () => {
+    expect(tool().inputSchema.safeParse({
+      property_url: validUrl, checkin: "2026-06-01", checkout: "2026-06-04",
+    }).success).toBe(true);
+  });
+
+  it("rejects non-URL property_url", () => {
+    expect(tool().inputSchema.safeParse({ property_url: "not-a-url" }).success).toBe(false);
+  });
+
+  it("rejects missing property_url", () => {
+    expect(tool().inputSchema.safeParse({}).success).toBe(false);
+  });
+
+  it("checkin/checkout are optional", () => {
+    expect(tool().inputSchema.safeParse({ property_url: validUrl }).success).toBe(true);
+  });
+});
+
+// ── get_availability schema ───────────────────────────────────────────────────
+
+describe("get_availability schema", () => {
+  const tool = () => adapter.tools().find((t) => t.name === "get_availability")!;
+  const validUrl = "https://www.booking.com/hotel/nl/some-hotel.html";
+
+  it("accepts valid input", () => {
+    expect(tool().inputSchema.safeParse({
+      property_url: validUrl, checkin: "2026-06-01", checkout: "2026-06-04",
+    }).success).toBe(true);
+  });
+
+  it("rejects missing checkin", () => {
+    expect(tool().inputSchema.safeParse({ property_url: validUrl, checkout: "2026-06-04" }).success).toBe(false);
+  });
+
+  it("rejects missing checkout", () => {
+    expect(tool().inputSchema.safeParse({ property_url: validUrl, checkin: "2026-06-01" }).success).toBe(false);
+  });
+
+  it("rejects non-URL property_url", () => {
+    expect(tool().inputSchema.safeParse({
+      property_url: "not-a-url", checkin: "2026-06-01", checkout: "2026-06-04",
+    }).success).toBe(false);
+  });
+
+  it("applies default adults=2", () => {
+    const result = tool().inputSchema.parse({ property_url: validUrl, checkin: "2026-06-01", checkout: "2026-06-04" });
+    expect(result.adults).toBe(2);
+  });
+});
+

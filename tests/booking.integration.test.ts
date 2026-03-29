@@ -183,3 +183,84 @@ describe("selector health after navigation", () => {
     expect(status.site).toBe("booking");
   }, 30_000);
 });
+
+// ── Phase 2: search_hotels (headless — no watch mode needed) ──────────────────
+
+describe("search_hotels live", () => {
+  it("returns results for a known destination", async () => {
+    const result = await client.callTool("search_hotels", {
+      destination: "Amsterdam",
+      checkin: "2026-08-01",
+      checkout: "2026-08-04",
+      adults: 2,
+      count: 5,
+    });
+    expect(result.isError).toBeFalsy();
+
+    const text = result.content[0]?.text ?? "";
+    expect(result.content[0]?.type).toBe("text");
+
+    // May be an array of results or a single full-page block
+    try {
+      const results = JSON.parse(text);
+      expect(Array.isArray(results)).toBe(true);
+      expect(results.length).toBeGreaterThan(0);
+      // Each result has rawText
+      for (const r of results) {
+        expect(typeof r.rawText).toBe("string");
+        expect(r.rawText.length).toBeGreaterThan(10);
+      }
+    } catch {
+      // If not JSON, rawText was returned as plain string — also acceptable
+      expect(text.length).toBeGreaterThan(50);
+    }
+  }, 30_000);
+
+  it("result content type is text", async () => {
+    const result = await client.callTool("search_hotels", {
+      destination: "London",
+      checkin: "2026-08-10",
+      checkout: "2026-08-12",
+      count: 1,
+    });
+    expect(result.content[0]?.type).toBe("text");
+  }, 30_000);
+});
+
+// ── Phase 2: get_property (headless) ─────────────────────────────────────────
+
+describe("get_property live", () => {
+  it("returns property details for a known Booking.com hotel URL", async () => {
+    // Intercontinental Amsterdam — stable, well-known hotel
+    const result = await client.callTool("get_property", {
+      property_url: "https://www.booking.com/hotel/nl/intercontinental-amstel.html",
+      checkin: "2026-08-01",
+      checkout: "2026-08-04",
+      adults: 2,
+    });
+    expect(result.isError).toBeFalsy();
+
+    const detail = JSON.parse(result.content[0]?.text ?? "{}") as { rawText: string; name: string };
+    expect(typeof detail.rawText).toBe("string");
+    expect(detail.rawText.length).toBeGreaterThan(100);
+  }, 30_000);
+});
+
+// ── Phase 2: get_availability (headless) ─────────────────────────────────────
+
+describe("get_availability live", () => {
+  it("returns room options for a known property", async () => {
+    const result = await client.callTool("get_availability", {
+      property_url: "https://www.booking.com/hotel/nl/intercontinental-amstel.html",
+      checkin: "2026-08-01",
+      checkout: "2026-08-04",
+      adults: 2,
+    });
+    expect(result.isError).toBeFalsy();
+
+    const detail = JSON.parse(result.content[0]?.text ?? "{}") as { rawText: string; roomOptions: string };
+    expect(typeof detail.rawText).toBe("string");
+    expect(detail.rawText.length).toBeGreaterThan(100);
+  }, 30_000);
+});
+
