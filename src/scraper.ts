@@ -318,7 +318,6 @@ export async function extractBookingDetail(
   baseBooking: Booking
 ): Promise<BookingDetail> {
   if (!detailUrl) {
-    // No direct URL — return what we have from the list
     return {
       ...baseBooking,
       propertyAddress: "",
@@ -335,6 +334,21 @@ export async function extractBookingDetail(
   await page.waitForSelector(SELECTORS.tripsContent, { timeout: 15_000 }).catch(() => {});
   await page.waitForTimeout(1_500);
 
+  // Dismiss the "Don't forget to use your rewards" promo modal that appears
+  // on confirmation pages — it covers the page content and pollutes rawText.
+  await page.evaluate(() => {
+    const dismiss = document.querySelector(
+      '[data-dismiss="modal"], ' +
+      'button[aria-label*="close" i], ' +
+      'button[aria-label*="dismiss" i], ' +
+      '[class*="modal"] [class*="close"], ' +
+      '[class*="modal"] button, ' +
+      'a[data-modal-action="close"]'
+    ) as HTMLElement | null;
+    dismiss?.click();
+  }).catch(() => {});
+  await page.waitForTimeout(500);
+
   const rawText = await page.evaluate(() => {
     const main = document.querySelector(
       'main, [role="main"], #bodyconstraint-inner'
@@ -342,25 +356,91 @@ export async function extractBookingDetail(
     return (main ?? document.body).innerText.trim();
   });
 
-  // Best-effort extraction from the detail page rawText
-  const checkInTime =
-    rawText.match(/check-in[^:]*from\s+([\d:]+)/i)?.[1] ??
-    rawText.match(/check-in[^:]*:\s*([^\n]+)/i)?.[1]?.trim() ?? "";
-  const checkOutTime =
-    rawText.match(/check-out[^:]*until\s+([\d:]+)/i)?.[1] ??
-    rawText.match(/check-out[^:]*:\s*([^\n]+)/i)?.[1]?.trim() ?? "";
-  const contactPhone = rawText.match(/(?:tel|phone|call)[^\d]*(\+?[\d\s\-()]{7,20})/i)?.[1]?.trim() ?? "";
-  const cancellationPolicy = rawText.match(/cancellation[^\n]{0,200}/i)?.[0]?.trim() ?? "";
-  const paymentSummary = rawText.match(/(?:total paid|payment)[^\n]{0,200}/i)?.[0]?.trim() ?? "";
-  const specialRequests = rawText.match(/special request[s]?[^\n]{0,300}/i)?.[0]?.trim() ?? "";
-  const propertyAddress = rawText.match(/(?:\d+\s+\w+\s+(?:street|road|avenue|lane|drive|blvd|st|rd|ave)[^\n]*)/i)?.[0]?.trim() ?? "";
+  // ── Confirmation page specific extractions ──────────────────────────────────
+  // The confirmation page uses labeled format: "Check-in\nSat, Mar 28, 2026"
+  // and "Check-out\nWed, Apr 1, 2026" — different from the trips list.
 
-  // Merge with base booking fields, prefer detail page data where better
-  const checkIn = extractDateNear(rawText, "check-in") || baseBooking.checkIn;
-  const checkOut = extractDateNear(rawText, "check-out") || baseBooking.checkOut;
+  // Confirmation number: "6683989891" shown near top or as "Booking number: XXXX"
+  const confirmationNumber =
+    rawText.match(/(?:booking number|confirmation|pin)[\s:]*(\d{7,12})/i)?.[1]?.trim() ||
+    rawText.match(/\b(\d{8,12})\b/)?.[1]?.trim() ||
+    baseBooking.confirmationNumber;
+
+  // Property name: on confirmation page, hotel name appears after the confirmation
+  // info block, just before "Check-in" — look for it in the lines before "Check-in"
+  const propertyName = (() => {
+    const lines = rawText.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+    const checkInIdx = lines.findIndex(l => /^check.in$/i.test(l));
+    if (checkInIdx > 0) {
+      // Hotel name is typically the last non-trivial line before "Check-in"
+      for (let i = checkInIdx - 1; i >= 0; i--) {
+        const l = lines[i]!;
+        if (l.length > 4 && l.length < 100 &&
+          !/^(Confirmed|Change|Message|Special|Approximate|Stay safe|You paid|Report|We'll|Learn|Print|Save|Download|Arrival)/i.test(l)) {
+          return l;
+        }
+      }
+    }
+    // Fallback: first line after "Your booking in X is confirmed"
+    const confirmedIdx = lines.findIndex(l => /Your booking.*confirmed/i.test(l));
+    if (confirmedIdx >= 0) {
+      for (let i = confirmedIdx + 1; i < lines.length; i++) {
+        const l = lines[i]!;
+        if (l.length > 4 && l.length < 100 && !/^(You|We|Get|Save|Print|Stay|To |Report|Learn|Booking\.com)/i.test(l)) {
+          return l;
+        }
+      }
+    }
+    return baseBooking.propertyName;
+  })();
+
+  // Dates — confirmation page format: "Check-in\nSat, Mar 28, 2026"
+  // Also try: "2026-03-28" ISO format in the text
+  const checkInRaw =
+    rawText.match(/check.in\s*\n+\w+,?\s*(\w+ \d+,?\s*\d{4})/i)?.[1]?.trim() ||
+    rawText.match(/check.in[^\n]*\n+([^\n]{5,30})/i)?.[1]?.trim() || "";
+  const checkOutRaw =
+    rawText.match(/check.out\s*\n+\w+,?\s*(\w+ \d+,?\s*\d{4})/i)?.[1]?.trim() ||
+    rawText.match(/check.out[^\n]*\n+([^\n]{5,30})/i)?.[1]?.trim() || "";
+
+  const checkIn = extractDateNear(rawText, "check-in") || checkInRaw || baseBooking.checkIn;
+  const checkOut = extractDateNear(rawText, "check-out") || checkOutRaw || baseBooking.checkOut;
+
+  // Times: on confirmation page, time appears on the line AFTER the date
+  // Pattern: "Check-in\nSat, Mar 28, 2026\n16:00 - 19:00"
+  const checkInTime = (() => {
+    const m = rawText.match(/check.in\s*\n[^\n]+\n\s*([\d:]+\s*[-–]\s*[\d:]+|[\d:]+(?:\s*(?:AM|PM))?)/i);
+    if (m?.[1]) return m[1].trim();
+    return rawText.match(/(?:check.in from|arrive from|check-in time)[^\d]*([\d:][\d: -]+)/i)?.[1]?.trim() ?? "";
+  })();
+  const checkOutTime = (() => {
+    const m = rawText.match(/check.out\s*\n[^\n]+\n\s*([\d:]+\s*[-–]\s*[\d:]+|[\d:]+(?:\s*(?:AM|PM))?)/i);
+    if (m?.[1]) return m[1].trim();
+    return rawText.match(/(?:check.out (?:until|before|by)|check-out time|until)[^\d]*([\d:][\d: -]+)/i)?.[1]?.trim() ?? "";
+  })();
+
+  // Contact phone
+  const contactPhone = rawText.match(/(?:tel|phone|call)[^\d]*(\+?[\d\s\-().]{7,20})/i)?.[1]?.trim() ?? "";
+
+  // Cancellation policy — grab the line/section after "Cancellation" heading
+  const cancellationPolicy =
+    rawText.match(/(?:free cancellation[^\n]*|non-refundable[^\n]*|cancellation policy[^\n]{0,200})/i)?.[0]?.trim() ?? "";
+
+  // Payment summary
+  const paymentSummary =
+    rawText.match(/(?:total paid|amount paid|payment)[^\n]{0,200}/i)?.[0]?.trim() ?? "";
+
+  // Special requests
+  const specialRequests = rawText.match(/special request[s]?[^\n]{0,300}/i)?.[0]?.trim() ?? "";
+
+  // Property address — look for numbered street address
+  const propertyAddress =
+    rawText.match(/\d+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Street|Road|Avenue|Lane|Drive|Blvd|St|Rd|Ave|Way|Piazza|Rue|Straat|Strasse)[^\n]*/i)?.[0]?.trim() ?? "";
 
   return {
     ...baseBooking,
+    confirmationNumber,
+    propertyName,
     checkIn,
     checkOut,
     nights: countNights(checkIn, checkOut) || baseBooking.nights,
@@ -578,5 +658,110 @@ export async function extractPropertyPage(page: Page): Promise<PropertyDetail> {
 
     return { name, rating, location, description, amenities, reviewSummary, roomOptions, rawText: fullText.slice(0, 3000) };
   }, PROPERTY_NAME_SELECTORS);
+}
+
+// ── Saved properties (wishlist) ───────────────────────────────────────────────
+
+export interface SavedProperty {
+  /** Hotel/property name */
+  name: string;
+  /** City + country */
+  location: string;
+  /** Score + label, e.g. "8.5 Excellent" */
+  rating: string;
+  /** Review count text */
+  reviewCount: string;
+  /** Full URL to the property page — pass to get_property or get_availability */
+  propertyUrl: string;
+  /** Full card innerText for LLM fallback */
+  rawText: string;
+}
+
+/** Wait selectors for wishlist items — tried in order */
+const WISHLIST_SELECTORS = [
+  '[data-testid="wishlist-item"]',
+  '[data-testid="property-card"]',
+  ".wishlist-item",
+  ".sr_item",
+  "div[data-hotelid]",
+] as const;
+
+/**
+ * Extract saved/wishlisted properties from www.booking.com/wishlist.html.
+ * Returns an empty array (not an error) if the wishlist is empty.
+ */
+export async function extractSavedProperties(page: Page, count: number): Promise<SavedProperty[]> {
+  // Wait for cards or the empty-state message
+  let found = false;
+  for (const sel of WISHLIST_SELECTORS) {
+    const n = await page.locator(sel).count().catch(() => 0);
+    if (n > 0) { found = true; break; }
+  }
+  if (!found) {
+    // Wait a bit more for JS to render
+    await page.waitForTimeout(2_000);
+  }
+
+  // Check for empty wishlist state
+  const pageText = await page.evaluate(() => document.body.innerText.trim()).catch(() => "");
+  if (
+    pageText.includes("haven't saved") ||
+    pageText.includes("no saved") ||
+    pageText.includes("no wishlisted") ||
+    pageText.includes("Start saving")
+  ) {
+    return [];
+  }
+
+  return page.evaluate(
+    ({ sels, maxCount }: { sels: readonly string[]; maxCount: number }) => {
+      // Find property card elements using the first matching selector
+      let cards: HTMLElement[] = [];
+      for (const sel of sels) {
+        const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+        if (els.length > 0) { cards = els; break; }
+      }
+
+      if (cards.length === 0) {
+        // Fallback: return the full page text as one item for LLM parsing
+        const main = document.querySelector("main, [role=\"main\"]") as HTMLElement | null;
+        const rawText = (main ?? document.body).innerText.trim();
+        return rawText.length > 50
+          ? [{ name: "", location: "", rating: "", reviewCount: "", propertyUrl: "", rawText }]
+          : [];
+      }
+
+      return cards.slice(0, maxCount).map((card): {
+        name: string; location: string; rating: string;
+        reviewCount: string; propertyUrl: string; rawText: string;
+      } => {
+        const rawText = card.innerText.trim();
+
+        // Property URL from a link inside the card
+        const anchor = card.querySelector("a[href*='/hotel/']") as HTMLAnchorElement | null;
+        const propertyUrl = anchor?.href ?? "";
+
+        // Rating: "8.5 Excellent" format
+        const ratingMatch = rawText.match(/\b(\d\.\d|\d+)\s*(Exceptional|Superb|Fabulous|Very good|Good|Pleasant|Fair|Okay|Poor)\b/i);
+        const rating = ratingMatch ? `${ratingMatch[1]} ${ratingMatch[2]}` : "";
+
+        // Review count
+        const reviewMatch = rawText.match(/(\d[\d,]+)\s+review/i);
+        const reviewCount = reviewMatch?.[1] ?? "";
+
+        // Location: "City, Country" or "Neighbourhood · X km"
+        const locationMatch = rawText.match(/[A-Z][a-z]+(?: [A-Z][a-z]+)*,\s*[A-Z][a-z]+/);
+        const location = locationMatch?.[0] ?? "";
+
+        // Name: first non-empty, non-navigation line
+        const name = rawText.split("\n")
+          .find((l) => l.trim().length > 3 && l.trim().length < 100)
+          ?.trim() ?? "";
+
+        return { name, location, rating, reviewCount, propertyUrl, rawText };
+      });
+    },
+    { sels: WISHLIST_SELECTORS, maxCount: count }
+  );
 }
 

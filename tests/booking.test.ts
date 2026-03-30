@@ -45,7 +45,7 @@ describe("tool registry", () => {
     expect(names).toContain("get_upcoming_bookings");
     expect(names).toContain("get_past_bookings");
     expect(names).toContain("get_booking_details");
-    expect(names).toHaveLength(6);
+    expect(names).toHaveLength(7);
   });
 
   it("every tool has a non-empty description", () => {
@@ -235,12 +235,13 @@ describe("SELECTORS export", () => {
 // ── Tool registry (Phase 2) ───────────────────────────────────────────────────
 
 describe("tool registry (Phase 2)", () => {
-  it("exposes all 6 tools (3 Phase 1 + 3 Phase 2)", () => {
+  it("exposes all 7 tools (3 Phase 1 + 3 Phase 2 search + 1 saved)", () => {
     const names = adapter.tools().map((t) => t.name);
     expect(names).toContain("search_hotels");
     expect(names).toContain("get_property");
     expect(names).toContain("get_availability");
-    expect(names).toHaveLength(6);
+    expect(names).toContain("get_saved_properties");
+    expect(names).toHaveLength(7);
   });
 });
 
@@ -363,4 +364,35 @@ describe("get_availability schema", () => {
     expect(result.adults).toBe(2);
   });
 });
+
+// ── get_saved_properties schema ───────────────────────────────────────────────
+
+describe("get_saved_properties schema", () => {
+  const tool = () => adapter.tools().find((t) => t.name === "get_saved_properties")!;
+
+  it("tool exists", () => {
+    expect(tool()).toBeDefined();
+  });
+
+  it("applies default count=20", () => {
+    expect(tool().inputSchema.parse({}).count).toBe(20);
+  });
+
+  it("accepts count=1 (min)", () => {
+    expect(tool().inputSchema.safeParse({ count: 1 }).success).toBe(true);
+  });
+
+  it("accepts count=100 (max)", () => {
+    expect(tool().inputSchema.safeParse({ count: 100 }).success).toBe(true);
+  });
+
+  it("rejects count=0", () => {
+    expect(tool().inputSchema.safeParse({ count: 0 }).success).toBe(false);
+  });
+
+  it("rejects count=101", () => {
+    expect(tool().inputSchema.safeParse({ count: 101 }).success).toBe(false);
+  });
+});
+
 

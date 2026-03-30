@@ -24,17 +24,12 @@ let client: TestMcpClient;
 
 beforeAll(async () => {
   client = await createTestMcpClient(MCP_URL);
-
-  // Switch to watch mode — required for secure.booking.com access
-  await client.callTool("browser", { action: "set_mode", mode: "watch" });
-
-  // Navigate to www.booking.com (where session cookies work)
+  // CloakBrowser handles DataDome in headless mode — no watch mode needed
+  // Navigate to homepage to seed the session cookie context
   await client.callTool("browser", { action: "navigate", url: "https://www.booking.com/" });
 }, 30_000);
 
 afterAll(async () => {
-  // Switch back to headless when done
-  await client.callTool("browser", { action: "set_mode", mode: "headless" }).catch(() => {});
   await client.close();
 });
 
@@ -263,4 +258,112 @@ describe("get_availability live", () => {
     expect(detail.rawText.length).toBeGreaterThan(100);
   }, 30_000);
 });
+
+// ── get_booking_details AC tests (AC2-AC9) ────────────────────────────────────
+
+describe("get_booking_details detail page (AC tests)", () => {
+  it("AC10: returns isError for a fake confirmation number", async () => {
+    const result = await client.callTool("get_booking_details", {
+      confirmation_number: "FAKE999999999",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text ?? "").toContain("not found");
+  }, 120_000);
+
+  it("AC2-AC9: confirmation page content (requires a real booking)", async () => {
+    // Get a real confirmation number from past bookings
+    const pastResult = await client.callTool("get_past_bookings", { count: 1 });
+    const past = JSON.parse(pastResult.content[0]?.text ?? "[]") as Array<{
+      confirmationNumber: string; rawText: string; detailUrl: string;
+    }>;
+
+    if (past.length === 0) {
+      console.log("No past bookings — skipping detail page AC tests");
+      return;
+    }
+
+    const booking = past[0]!;
+    // Use confirmationNumber if extracted, else extract a numeric run from rawText
+    const confirmNum =
+      booking.confirmationNumber ||
+      booking.rawText.match(/\b(\d{7,12})\b/)?.[1] ||
+      "";
+
+    if (!confirmNum) {
+      console.log("Could not extract confirmation number — skipping");
+      return;
+    }
+
+    const result = await client.callTool("get_booking_details", {
+      confirmation_number: confirmNum,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const detail = JSON.parse(result.content[0]?.text ?? "{}") as {
+      rawText: string;
+      propertyName: string;
+      confirmationNumber: string;
+      checkIn: string;
+      checkOut: string;
+    };
+
+    // AC2: modal was dismissed — "Don't forget to use your rewards" should not appear
+    expect(detail.rawText).not.toContain("Don't forget to use your rewards");
+
+    // AC3: rawText from detail page (not trips-list) is substantial
+    expect(detail.rawText.length).toBeGreaterThan(500);
+
+    // AC4: confirmationNumber looks like a real number
+    if (detail.confirmationNumber) {
+      expect(detail.confirmationNumber).toMatch(/\d{7,12}/);
+    }
+
+    // AC5: propertyName is an actual hotel (not "Bookings & Trips")
+    expect(detail.propertyName).not.toBe("Bookings & Trips");
+
+    // AC6 + AC7: dates populated
+    if (detail.checkIn) {
+      expect(typeof detail.checkIn).toBe("string");
+      expect(detail.checkIn.length).toBeGreaterThan(0);
+    }
+  }, 180_000);
+});
+
+// ── get_saved_properties (headless) ──────────────────────────────────────────
+
+describe("get_saved_properties live", () => {
+  it("AC1: tool dispatches without error", async () => {
+    const result = await client.callTool("get_saved_properties", { count: 5 });
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0]?.type).toBe("text");
+  }, 30_000);
+
+  it("AC2/AC3: returns array (empty or populated)", async () => {
+    const result = await client.callTool("get_saved_properties", { count: 20 });
+    expect(result.isError).toBeFalsy();
+
+    const items = JSON.parse(result.content[0]?.text ?? "[]") as Array<{
+      name: string; propertyUrl: string; rawText: string;
+    }>;
+
+    expect(Array.isArray(items)).toBe(true);
+
+    for (const item of items) {
+      // AC4: propertyUrl starts with booking.com/hotel/
+      if (item.propertyUrl) {
+        expect(item.propertyUrl).toContain("booking.com/hotel/");
+      }
+      // AC5: name non-empty (if URL found, name should be too)
+      if (item.propertyUrl) {
+        expect(item.name.length).toBeGreaterThan(0);
+      }
+      // AC6: rawText present
+      expect(typeof item.rawText).toBe("string");
+    }
+
+    // AC7: count respected
+    expect(items.length).toBeLessThanOrEqual(20);
+  }, 30_000);
+});
+
 

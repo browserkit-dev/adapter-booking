@@ -2,7 +2,7 @@ import { defineAdapter } from "@browserkit/core";
 import { z } from "zod";
 import type { Page } from "patchright";
 import { SELECTORS } from "./selectors.js";
-import { extractTripsPage, extractBookingDetail, extractSearchResults, extractPropertyPage } from "./scraper.js";
+import { extractTripsPage, extractBookingDetail, extractSearchResults, extractPropertyPage, extractSavedProperties } from "./scraper.js";
 
 // ── Schemas ───────────────────────────────────────────────────────────────────
 
@@ -302,6 +302,76 @@ export default defineAdapter({
         const detail = await extractPropertyPage(page);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(detail, null, 2) }],
+        };
+      },
+    },
+
+    // ── get_saved_properties ──────────────────────────────────────────────────
+    {
+      name: "get_saved_properties",
+      description: [
+        "Get your saved/wishlisted properties on Booking.com.",
+        "Returns properties you've hearted/saved while browsing.",
+        "Works in headless mode — no watch mode required.",
+        "",
+        "Returns: SavedProperty[] with name, location, rating, propertyUrl, rawText.",
+        "Returns an empty array if your wishlist is empty.",
+        "",
+        "Pass propertyUrl to get_property or get_availability for full details and pricing.",
+      ].join("\n"),
+      inputSchema: z.object({
+        count: z.number().int().min(1).max(100).default(20)
+          .describe("Max number of saved properties to return (1–100)"),
+      }),
+      annotations: { readOnlyHint: true as const },
+      async handler(page: Page, input: unknown) {
+        const { count } = z.object({ count: z.number().default(20) }).parse(input);
+
+        // Booking.com's saved/wishlist feature does not have a stable web URL —
+        // it is accessible only through the app or account menu dropdown navigation.
+        // Try known candidate URLs and return whatever is found.
+        const candidateUrls = [
+          "https://www.booking.com/savelist.html",
+          "https://www.booking.com/wishlist.html",
+          "https://www.booking.com/wishlists",
+          "https://account.booking.com/wishlists",
+        ];
+
+        for (const url of candidateUrls) {
+          await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => {});
+          await page.waitForTimeout(1_500);
+
+          const title = await page.title().catch(() => "");
+          const bodyText = await page.evaluate(() => document.body?.innerText?.trim() ?? "").catch(() => "");
+
+          // Skip 404 / redirect-to-homepage pages
+          if (
+            bodyText.includes("Page Not Found") ||
+            bodyText.includes("page not found") ||
+            title.includes("Online Hotel Reservations") && !bodyText.includes("saved") && !bodyText.includes("wishlist")
+          ) {
+            continue;
+          }
+
+          // Found a real page — extract properties
+          await page.waitForTimeout(500);
+          const results = await extractSavedProperties(page, count);
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }],
+          };
+        }
+
+        // No saved properties page found — return informative message
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              message: "Booking.com's saved properties feature is not accessible via web URL. " +
+                "To view saved properties, use the Booking.com app or browse properties " +
+                "on www.booking.com and look for the heart icon.",
+              savedProperties: [],
+            }, null, 2),
+          }],
         };
       },
     },
