@@ -2,7 +2,7 @@ import { defineAdapter } from "@browserkit/core";
 import { z } from "zod";
 import type { Page } from "patchright";
 import { SELECTORS } from "./selectors.js";
-import { extractTripsPage, extractBookingDetail, extractSearchResults, extractPropertyPage, extractSavedProperties } from "./scraper.js";
+import { extractTripsPage, extractBookingDetail, extractSearchResults, extractPropertyPage, extractSavedProperties, extractPropertyReviews, type ReviewSort } from "./scraper.js";
 
 // ── Schemas ───────────────────────────────────────────────────────────────────
 
@@ -330,6 +330,65 @@ export default defineAdapter({
         const results = await extractSavedProperties(page, count);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }],
+        };
+      },
+    },
+
+    // ── get_reviews ───────────────────────────────────────────────────────────
+    {
+      name: "get_reviews",
+      description: [
+        "Get guest reviews for a Booking.com property.",
+        "Opens the 'Read all reviews' modal on the property page and extracts up to count reviews.",
+        "Each review includes: reviewer name, country, score, date, review title, pros, cons,",
+        "room type, stay duration, traveller type, and rawText for LLM fallback.",
+        "",
+        "Sort options (matching Booking.com's modal dropdown):",
+        "  most_relevant (default), newest_first, oldest_first, highest_scores, lowest_scores",
+        "",
+        "Use get_saved_properties, search_hotels, or get_property to find a property_url first.",
+        "",
+        "Examples:",
+        "  get_reviews({ property_url: 'https://www.booking.com/hotel/it/il-castelluccio-countryresort.html', count: 20 })",
+        "  get_reviews({ property_url: '...', count: 50, sort: 'newest_first' })",
+      ].join("\n"),
+      inputSchema: z.object({
+        property_url: z.string().url()
+          .describe("Full Booking.com hotel URL — from search_hotels, get_saved_properties, etc."),
+        count: z.number().int().min(1).max(75).default(10)
+          .describe("Max reviews to return (1–75)"),
+        sort: z.enum(["most_relevant", "newest_first", "oldest_first", "highest_scores", "lowest_scores"])
+          .default("most_relevant")
+          .optional()
+          .describe("Sort order: most_relevant (default), newest_first, oldest_first, highest_scores, lowest_scores"),
+      }),
+      annotations: { readOnlyHint: true as const, openWorldHint: true as const },
+      async handler(page: Page, input: unknown) {
+        const { property_url, count, sort } = z.object({
+          property_url: z.string().url(),
+          count: z.number().int().min(1).max(75).default(10),
+          sort: z.enum(["most_relevant", "newest_first", "oldest_first", "highest_scores", "lowest_scores"])
+            .default("most_relevant")
+            .optional(),
+        }).parse(input);
+
+        // Validate it's a Booking.com URL
+        if (!property_url.includes("booking.com")) {
+          return {
+            content: [{ type: "text" as const, text: "Error: property_url must be a Booking.com hotel URL." }],
+            isError: true,
+          };
+        }
+
+        const reviews = await extractPropertyReviews(
+          page,
+          property_url,
+          count,
+          (sort ?? "most_relevant") as ReviewSort
+        );
+
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(reviews, null, 2) }],
         };
       },
     },

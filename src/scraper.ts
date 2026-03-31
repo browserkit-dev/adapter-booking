@@ -456,6 +456,40 @@ export async function extractBookingDetail(
   };
 }
 
+// ── Reviews types ─────────────────────────────────────────────────────────────
+
+export type ReviewSort =
+  | "most_relevant"
+  | "newest_first"
+  | "oldest_first"
+  | "highest_scores"
+  | "lowest_scores";
+
+export interface PropertyReview {
+  /** Reviewer display name */
+  reviewer: string;
+  /** Reviewer nationality, e.g. "France" */
+  country: string;
+  /** Review score, e.g. 9.2 */
+  score: number | null;
+  /** Review date as displayed, e.g. "Reviewed: March 29, 2026" */
+  date: string;
+  /** Bold review headline, e.g. "Exceptional" */
+  title: string;
+  /** Positive body text */
+  pros: string;
+  /** Negative body text (may be empty) */
+  cons: string;
+  /** Room type booked, e.g. "Family Suite" */
+  roomType: string;
+  /** Stay duration string, e.g. "2 nights · March 2026" */
+  stayDuration: string;
+  /** Traveller type, e.g. "Couple" */
+  travellerType: string;
+  /** Full card innerText — LLM fallback */
+  rawText: string;
+}
+
 // ── Phase 2: Search & Property types ─────────────────────────────────────────
 
 export interface SearchResult {
@@ -1084,6 +1118,257 @@ export async function extractSavedProperties(page: Page, count: number): Promise
 
   // Final fallback: DOM extraction from current page
   return extractFromCurrentPage(page, "");
+}
+
+// ── Reviews extraction ────────────────────────────────────────────────────────
+
+/** Candidate selectors for individual review cards inside the reviewlist page */
+const REVIEW_CARD_SELECTORS = [
+  '[data-testid="review-card"]',
+  '.review_list_new_item_block',
+  '[data-review-id]',
+  '.c-review',
+] as const;
+
+/**
+ * Attempt to extract reviews from a Booking.com API response JSON blob.
+ * Supports the REST review gateway and GraphQL shapes.
+ */
+function extractReviewsFromApiResponse(body: Record<string, unknown>): Array<{
+  rawText: string; score: string; title: string; pros: string; cons: string;
+  reviewer: string; country: string; date: string; roomType: string; stayDuration: string; travellerType: string;
+}> {
+  type ApiReview = Record<string, unknown>;
+  const results: ReturnType<typeof extractReviewsFromApiResponse> = [];
+
+  // Shape 1: { reviews: [...] } or { data: { reviews: [...] } }
+  const reviews: unknown[] =
+    (body["reviews"] as unknown[]) ||
+    ((body["data"] as Record<string, unknown>)?.["reviews"] as unknown[]) ||
+    ((body["result"] as Record<string, unknown>)?.["reviews"] as unknown[]) ||
+    [];
+
+  for (const rev of reviews) {
+    const r = rev as ApiReview;
+    const text = JSON.stringify(r);
+    results.push({
+      rawText: text.slice(0, 500),
+      score: String(r["average_score"] ?? r["score"] ?? r["rating"] ?? ""),
+      title: String(r["title"] ?? r["headline"] ?? ""),
+      pros: String(r["pros"] ?? r["positive"] ?? r["liked"] ?? ""),
+      cons: String(r["cons"] ?? r["negative"] ?? r["disliked"] ?? ""),
+      reviewer: String(r["author"] ?? r["reviewer_name"] ?? r["name"] ?? ""),
+      country: String(r["author_country"] ?? r["country"] ?? r["nationality"] ?? ""),
+      date: String(r["review_date"] ?? r["date"] ?? ""),
+      roomType: String(r["room_name"] ?? r["room_type"] ?? ""),
+      stayDuration: String(r["stay_duration"] ?? r["nights"] ?? ""),
+      travellerType: String(r["traveller_type"] ?? r["group_type"] ?? ""),
+    });
+  }
+  return results;
+}
+
+/**
+ * Extract guest reviews for a Booking.com property using the dedicated
+ * `reviewlist.html` paginated page.
+ *
+ * This is far simpler and more reliable than trying to control the reviews
+ * modal on the property page. The reviewlist URL is:
+ *   www.booking.com/reviewlist.html?pagename=X&cc1=Y&type=total&rows=25&offset=N
+ *
+ * Sort params discovered from the reviewlist page UI:
+ *   most_relevant → (no sort param)
+ *   newest_first  → sort=f_recent_desc
+ *   oldest_first  → sort=f_recent_asc
+ *   highest_scores→ sort=f_score_desc
+ *   lowest_scores → sort=f_score_asc
+ *
+ * Returns up to `count` reviews (max 75). Falls back gracefully on error.
+ */
+export async function extractPropertyReviews(
+  page: Page,
+  propertyUrl: string,
+  count: number,
+  sort: ReviewSort
+): Promise<PropertyReview[]> {
+  // Extract pageName and countryCode from the property URL
+  // e.g. https://www.booking.com/hotel/it/il-castelluccio-countryresort.html
+  const urlMatch = propertyUrl.match(/\/hotel\/([a-z]{2})\/([^/?#]+?)(?:\.html)?(?:\?|$)/);
+  if (!urlMatch) {
+    return []; // not a recognisable Booking.com hotel URL
+  }
+  const [, cc1, pageName] = urlMatch;
+
+  const sortParam: Record<ReviewSort, string> = {
+    most_relevant: "",
+    newest_first: "f_recent_desc",
+    oldest_first: "f_recent_asc",
+    highest_scores: "f_score_desc",
+    lowest_scores: "f_score_asc",
+  };
+
+  const allCards: PropertyReview[] = [];
+  const seenKeys = new Set<string>();
+  const rowsPerPage = 25;
+  let offset = 0;
+
+  while (allCards.length < count) {
+    const params = new URLSearchParams({
+      pagename: pageName ?? "",
+      cc1: cc1 ?? "",
+      type: "total",
+      rows: String(rowsPerPage),
+      offset: String(offset),
+      lang: "en-us",
+    });
+    const sortVal = sortParam[sort];
+    if (sortVal) params.set("sort", sortVal);
+
+    const reviewListUrl = `https://www.booking.com/reviewlist.html?${params.toString()}`;
+    await page.goto(reviewListUrl, { waitUntil: "domcontentloaded", timeout: 25_000 });
+    await page.waitForTimeout(1_500);
+
+    // Extract review blocks from the page
+    const batch = await page.evaluate(
+      ({ cardSels }: { cardSels: readonly string[] }) => {
+        type RawReview = {
+          rawText: string; score: string; title: string; pros: string; cons: string;
+          reviewer: string; country: string; date: string;
+          roomType: string; stayDuration: string; travellerType: string;
+        };
+
+        // Try data-testid card selectors first
+        let cards: HTMLElement[] = [];
+        for (const sel of cardSels) {
+          const found = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+          if (found.length > 0) { cards = found; break; }
+        }
+
+        // Fallback: extract from full page innerText by splitting on "Reviewed:" markers
+        if (cards.length === 0) {
+          const main = document.querySelector("main, #bodyconstraint-inner, .review_list") as HTMLElement | null;
+          const fullText = (main ?? document.body).innerText.trim();
+
+          // Split on Reviewed: anchors — each review starts with a reviewer name and ends
+          // just before the next reviewer's block
+          const blocks = fullText.split(/\n(?=\S.*?\n(?:Suite|Room|Apartment|Studio|Villa|Bungalow|Double|Twin|Single|Triple|Family|Deluxe|Standard|Superior|Classic|Luxury|Junior|Penthouse|Executive|Premiere)\n)/i);
+
+          if (blocks.length <= 1) {
+            // Second fallback: split on "Reviewed: " lines as anchors
+            const byReviewed = fullText.split(/(?=Reviewed:\s)/i);
+            if (byReviewed.length > 1) {
+              return byReviewed.slice(1).map((block: string): RawReview => {
+                const lines = block.split("\n").map((l: string) => l.trim()).filter((l: string) => l.length > 0);
+                const dateMatch = lines[0]?.match(/Reviewed:\s*(.+)/i);
+                const date = dateMatch?.[1]?.trim() ?? "";
+                const title = lines[1] ?? "";
+                const score = lines[2]?.match(/\b(10(?:\.0)?|[0-9]\.[0-9])\b/)?.[1] ?? "";
+                const prosLine = lines.find((l: string) => /^Liked\s*[·•]/i.test(l));
+                const consLine = lines.find((l: string) => /^Disliked\s*[·•]/i.test(l));
+                const pros = prosLine ? prosLine.replace(/^Liked\s*[·•\s]*/i, "").trim() : "";
+                const cons = consLine ? consLine.replace(/^Disliked\s*[·•\s]*/i, "").trim() : "";
+                return {
+                  rawText: block.slice(0, 600),
+                  score, title, pros, cons,
+                  reviewer: "", country: "", date,
+                  roomType: "", stayDuration: "", travellerType: "",
+                };
+              });
+            }
+          }
+
+          return [];
+        }
+
+        // Process found card elements
+        const results: RawReview[] = [];
+        for (const card of cards) {
+          const rawText = card.innerText?.trim() ?? "";
+          if (!rawText || rawText.length < 20) continue;
+
+          const scoreMatch = rawText.match(/\b(10(?:\.0)?|[0-9]\.[0-9])\b/);
+          const score = scoreMatch?.[1] ?? "";
+
+          const boldEl = card.querySelector("strong, b, h3, h4, [data-testid='review-title']") as HTMLElement | null;
+          let title = boldEl?.innerText?.trim() ?? "";
+          if (!title) {
+            const tm = rawText.match(/\b(Exceptional|Wonderful|Good|Superb|Fabulous|Pleasant|Poor|Okay)\b/);
+            title = tm?.[1] ?? "";
+          }
+
+          const posEl = card.querySelector('[data-testid="review-positive-text"], [data-testid="review-body-pos"]') as HTMLElement | null;
+          const negEl = card.querySelector('[data-testid="review-negative-text"], [data-testid="review-body-neg"]') as HTMLElement | null;
+          let pros = posEl?.innerText?.trim() ?? "";
+          let cons = negEl?.innerText?.trim() ?? "";
+
+          if (!pros && !cons) {
+            const prosLine = rawText.match(/Liked\s*[·•][^\n]*/i)?.[0];
+            const consLine = rawText.match(/Disliked\s*[·•][^\n]*/i)?.[0];
+            pros = prosLine ? prosLine.replace(/^Liked\s*[·•\s]*/i, "").trim() : "";
+            cons = consLine ? consLine.replace(/^Disliked\s*[·•\s]*/i, "").trim() : "";
+            if (!pros) {
+              pros = rawText.split("\n").filter((l: string) => l.trim().length > 20).slice(0, 3).join(" ").slice(0, 400);
+            }
+          }
+
+          const avatarEl = card.querySelector('[data-testid="review-author"], [class*="bui-avatar-block__title"]') as HTMLElement | null;
+          const countryEl = card.querySelector('[data-testid="review-country"], [class*="bui-avatar-block__subtitle"]') as HTMLElement | null;
+          let reviewer = avatarEl?.innerText?.trim() ?? "";
+          let country = countryEl?.innerText?.trim().replace(/[\u{1F000}-\u{1FFFF}]/gu, "").trim() ?? "";
+          if (!reviewer) {
+            const nameLines = rawText.split("\n").map((l: string) => l.trim()).filter((l: string) => l.length > 1 && l.length < 40);
+            reviewer = nameLines[0] ?? "";
+            if (!country) country = nameLines[1] ?? "";
+          }
+
+          const dateMatch = rawText.match(/reviewed[:\s]+([^\n]+)/i);
+          const date = dateMatch?.[1]?.trim() ?? "";
+
+          const metaMatch = rawText.match(/(\d+\s+nights?\s*[·•·]\s*\w+ \d{4})/i);
+          const stayDuration = metaMatch?.[1]?.trim() ?? "";
+
+          const roomMatch = rawText.match(/\bsuite\b|\broom\b|\bapartment\b|\bstudio\b|\bvilla\b|\bbungalow\b|\bdouble\b|\btwin\b|\bsingle\b|\bfamily\b/i);
+          const roomType = roomMatch
+            ? rawText.split("\n").find((l: string) => new RegExp(roomMatch[0], "i").test(l))?.trim() ?? ""
+            : "";
+
+          const travellerMatch = rawText.match(/\b(couple|solo traveller|family|group|business traveller)\b/i);
+          const travellerType = travellerMatch?.[1]?.trim() ?? "";
+
+          results.push({ rawText, score, title, pros, cons, reviewer, country, date, roomType, stayDuration, travellerType });
+        }
+        return results;
+      },
+      { cardSels: REVIEW_CARD_SELECTORS }
+    );
+
+    if (batch.length === 0) break; // no more reviews or page error
+
+    for (const raw of batch) {
+      const key = raw.rawText.slice(0, 80);
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      allCards.push({
+        reviewer: raw.reviewer,
+        country: raw.country,
+        score: raw.score ? parseFloat(raw.score) : null,
+        date: raw.date,
+        title: raw.title,
+        pros: raw.pros,
+        cons: raw.cons,
+        roomType: raw.roomType,
+        stayDuration: raw.stayDuration,
+        travellerType: raw.travellerType,
+        rawText: raw.rawText,
+      });
+      if (allCards.length >= count) break;
+    }
+
+    if (allCards.length >= count) break;
+    offset += rowsPerPage;
+  }
+
+  return allCards;
 }
 
 /** Extract properties from the currently loaded mywishlist page */

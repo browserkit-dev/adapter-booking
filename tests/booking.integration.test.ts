@@ -366,4 +366,102 @@ describe("get_saved_properties live", () => {
   }, 30_000);
 });
 
+// ── get_reviews (headless, requires property page navigation) ─────────────────
 
+// Well-reviewed property with 1,600+ reviews — stable fixture
+const CASTELLUCCIO_URL = "https://www.booking.com/hotel/it/il-castelluccio-countryresort.html";
+
+describe("get_reviews live", () => {
+  it("AC1: tool is registered and dispatches without error", async () => {
+    const result = await client.callTool("get_reviews", {
+      property_url: CASTELLUCCIO_URL,
+      count: 5,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0]?.type).toBe("text");
+  }, 60_000);
+
+  it("AC2: returns ≥ 10 reviews when count: 15 for a well-reviewed property", async () => {
+    const result = await client.callTool("get_reviews", {
+      property_url: CASTELLUCCIO_URL,
+      count: 15,
+    });
+    expect(result.isError).toBeFalsy();
+
+    const reviews = JSON.parse(result.content[0]?.text ?? "[]") as Array<{
+      rawText: string; title: string; pros: string; cons: string;
+    }>;
+    expect(Array.isArray(reviews)).toBe(true);
+    expect(reviews.length).toBeGreaterThanOrEqual(10);
+  }, 90_000);
+
+  it("AC3: every review has non-empty rawText", async () => {
+    const result = await client.callTool("get_reviews", {
+      property_url: CASTELLUCCIO_URL,
+      count: 10,
+    });
+    const reviews = JSON.parse(result.content[0]?.text ?? "[]") as Array<{ rawText: string }>;
+    for (const r of reviews) {
+      expect(typeof r.rawText).toBe("string");
+      expect(r.rawText.length).toBeGreaterThan(10);
+    }
+  }, 60_000);
+
+  it("AC4: at least one structured field populated per review (title, pros, or cons)", async () => {
+    const result = await client.callTool("get_reviews", {
+      property_url: CASTELLUCCIO_URL,
+      count: 10,
+    });
+    const reviews = JSON.parse(result.content[0]?.text ?? "[]") as Array<{
+      title: string; pros: string; cons: string;
+    }>;
+    for (const r of reviews) {
+      const hasStructured = r.title.length > 0 || r.pros.length > 0 || r.cons.length > 0;
+      expect(hasStructured).toBe(true);
+    }
+  }, 60_000);
+
+  it("AC5: count is respected — returned length ≤ count", async () => {
+    const result = await client.callTool("get_reviews", {
+      property_url: CASTELLUCCIO_URL,
+      count: 7,
+    });
+    const reviews = JSON.parse(result.content[0]?.text ?? "[]") as unknown[];
+    expect(reviews.length).toBeLessThanOrEqual(7);
+  }, 60_000);
+
+  it("AC6: all sort values are accepted without error", async () => {
+    const sortValues = ["most_relevant", "newest_first", "oldest_first", "highest_scores", "lowest_scores"] as const;
+    for (const sort of sortValues) {
+      const result = await client.callTool("get_reviews", {
+        property_url: CASTELLUCCIO_URL,
+        count: 5,
+        sort,
+      });
+      expect(result.isError).toBeFalsy();
+    }
+  }, 120_000);
+
+  it("AC7: count: 50 returns ≥ 40 reviews (validates scroll/pagination)", async () => {
+    const result = await client.callTool("get_reviews", {
+      property_url: CASTELLUCCIO_URL,
+      count: 50,
+    });
+    expect(result.isError).toBeFalsy();
+    const reviews = JSON.parse(result.content[0]?.text ?? "[]") as unknown[];
+    expect(reviews.length).toBeGreaterThanOrEqual(40);
+  }, 180_000);
+
+  it("AC8: invalid (non-Booking.com) URL returns isError=true", async () => {
+    const result = await client.callTool("get_reviews", {
+      property_url: "https://www.google.com/",
+      count: 5,
+    });
+    const reviews = result.isError
+      ? []
+      : (JSON.parse(result.content[0]?.text ?? "[]") as unknown[]);
+    // Either explicit error flag or empty array — not a crash
+    const graceful = result.isError === true || reviews.length === 0;
+    expect(graceful).toBe(true);
+  }, 30_000);
+});
