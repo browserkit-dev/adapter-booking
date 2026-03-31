@@ -944,97 +944,180 @@ async function callGraphQL<T>(page: Page, query: string, variables?: Record<stri
  * Returns all hotels across all wishlists, up to `count`.
  */
 export async function extractSavedProperties(page: Page, count: number): Promise<SavedProperty[]> {
-  // Navigate to the wishlist page — confirmed URL and works when logged in
+  // Intercept the GraphQL responses that the page naturally makes when loading mywishlist.html.
+  // The page calls wishlistsDetailForWishlistWidget + userWishlistById automatically.
+  // We capture those responses instead of trying to replay the API call ourselves
+  // (which fails due to CSRF token complexity).
+
+  const capturedWishlists: WishlistGraphQLResponse["data"]["wishlistService"]["userWishlist"] = undefined as never;
+  const capturedListDetails = new Map<string, NonNullable<WishlistGraphQLResponse["data"]["wishlistService"]["userWishlistById"]>>();
+  void capturedListDetails; // unused — interceptedData.listDetails used instead
+
+  const interceptedData: {
+    wishlists?: Array<{ listId: number; nbHotels: number }>;
+    listDetails: Map<string, { hotels: Array<{
+      displayName: string; pageName: string;
+      location: { displayLocation: string; countryCode: string };
+      reviews: { totalScore: number; reviewsCount: number };
+      starRating?: { value: number } | null;
+      availabilityData?: { isSoldOut: boolean; priceDisplayInfo?: { displayPrice?: { amountPerStay?: { amountRounded: string; currency: string } } } };
+    }>; name: string | null; listId: number }>;
+  } = { listDetails: new Map() };
+
+  // Set up response interceptor BEFORE navigation
+  page.on("response", async (response) => {
+    const url = response.url();
+    if (!url.includes("/dml/graphql")) return;
+    try {
+      const body = await response.json() as WishlistGraphQLResponse;
+      if (!body?.data?.wishlistService) return;
+
+      // Capture wishlists list
+      const userWishlist = body.data.wishlistService.userWishlist;
+      if (userWishlist?.wishlists && userWishlist.wishlists.length > 0) {
+        interceptedData.wishlists = userWishlist.wishlists;
+      }
+
+      // Capture individual wishlist details
+      const wishlistById = body.data.wishlistService.userWishlistById;
+      if (wishlistById?.wishlist) {
+        const wl = wishlistById.wishlist;
+        const listId = String(wl.listId ?? "");
+        if (listId && wl.hotels) {
+          interceptedData.listDetails.set(listId, {
+            listId: wl.listId ?? 0,
+            name: wl.name,
+            hotels: (wl.hotels ?? []).map((h) => {
+              const d = h.details;
+              return {
+                displayName: d.displayName,
+                pageName: d.pageName,
+                location: d.location,
+                reviews: d.reviews,
+                starRating: d.starRating,
+                availabilityData: d.availabilityData,
+              };
+            }),
+          });
+        }
+      }
+    } catch { /* ignore parse errors */ }
+  });
+
+  // Navigate — this triggers the natural GraphQL calls
   await page.goto("https://www.booking.com/mywishlist.html", {
     waitUntil: "domcontentloaded",
     timeout: 20_000,
   });
-  // Wait for React to render the wishlist content
-  await page.waitForTimeout(3_000);
+  await page.waitForTimeout(3_500); // wait for API calls to complete
 
-  // First try: GraphQL API for structured data
-  // Falls through to DOM extraction if GraphQL CSRF fails
-  try {
-    const listResp = await callGraphQL<WishlistGraphQLResponse>(page, WISHLIST_LIST_QUERY);
-    const wishlists = listResp?.data?.wishlistService?.userWishlist?.wishlists ?? [];
+  // If we captured GraphQL data, use it (best quality)
+  if (interceptedData.listDetails.size > 0) {
+    const results: SavedProperty[] = [];
 
-    if (wishlists.length > 0) {
-      const results: SavedProperty[] = [];
+    for (const [listId, wl] of interceptedData.listDetails) {
+      if (results.length >= count) break;
+      const wishlistName = wl.name ?? `Wishlist ${listId}`;
 
-      for (const wl of wishlists) {
+      for (const d of wl.hotels) {
+        if (results.length >= count) break;
+        const priceInfo = d.availabilityData?.priceDisplayInfo?.displayPrice?.amountPerStay;
+
+        results.push({
+          name: d.displayName,
+          location: `${d.location?.displayLocation ?? ""}, ${(d.location?.countryCode ?? "").toUpperCase()}`,
+          rating: d.reviews?.totalScore ?? null,
+          reviewCount: d.reviews?.reviewsCount ?? 0,
+          stars: d.starRating?.value ?? null,
+          price: priceInfo?.amountRounded ?? "",
+          currency: priceInfo?.currency ?? "",
+          isSoldOut: d.availabilityData?.isSoldOut ?? false,
+          propertyUrl: `https://www.booking.com/hotel/${d.location?.countryCode ?? "xx"}/${d.pageName}.html`,
+          pageName: d.pageName,
+          wishlistId: listId,
+          wishlistName,
+        });
+      }
+    }
+
+    // If we have the wishlists list but not all their details, navigate to remaining ones
+    if (interceptedData.wishlists && interceptedData.wishlists.length > interceptedData.listDetails.size) {
+      for (const wl of interceptedData.wishlists) {
         if (results.length >= count) break;
         if (wl.nbHotels === 0) continue;
+        if (interceptedData.listDetails.has(String(wl.listId))) continue;
 
-        const detailResp = await callGraphQL<WishlistGraphQLResponse>(
-          page,
-          WISHLIST_HOTELS_QUERY,
-          { input: { listId: String(wl.listId), verticals: ["ACCOMMODATION"] } }
-        );
+        // Navigate to this specific wishlist to trigger its GraphQL load
+        await page.goto(`https://www.booking.com/mywishlist.html?wl_id=${wl.listId}`, {
+          waitUntil: "domcontentloaded",
+          timeout: 15_000,
+        });
+        await page.waitForTimeout(2_500);
 
-        const wishlistData = detailResp?.data?.wishlistService?.userWishlistById?.wishlist;
-        if (!wishlistData) continue;
-
-        const wishlistName = wishlistData.name ?? `Wishlist ${wl.listId}`;
-
-        for (const hotel of (wishlistData.hotels ?? [])) {
-          if (results.length >= count) break;
-          const d = hotel.details;
-          if (!d) continue;
-
-          const priceInfo = d.availabilityData?.priceDisplayInfo?.displayPrice?.amountPerStay;
-
-          results.push({
-            name: d.displayName,
-            location: `${d.location?.displayLocation ?? ""}, ${(d.location?.countryCode ?? "").toUpperCase()}`,
-            rating: d.reviews?.totalScore ?? null,
-            reviewCount: d.reviews?.reviewsCount ?? 0,
-            stars: d.starRating?.value ?? null,
-            price: priceInfo?.amountRounded ?? "",
-            currency: priceInfo?.currency ?? "",
-            isSoldOut: d.availabilityData?.isSoldOut ?? false,
-            propertyUrl: `https://www.booking.com/hotel/${d.location?.countryCode ?? "xx"}/${d.pageName}.html`,
-            pageName: d.pageName,
-            wishlistId: String(wl.listId),
-            wishlistName,
-          });
+        const freshData = interceptedData.listDetails.get(String(wl.listId));
+        if (freshData) {
+          const wishlistName = freshData.name ?? `Wishlist ${wl.listId}`;
+          for (const d of freshData.hotels) {
+            if (results.length >= count) break;
+            const priceInfo = d.availabilityData?.priceDisplayInfo?.displayPrice?.amountPerStay;
+            results.push({
+              name: d.displayName,
+              location: `${d.location?.displayLocation ?? ""}, ${(d.location?.countryCode ?? "").toUpperCase()}`,
+              rating: d.reviews?.totalScore ?? null,
+              reviewCount: d.reviews?.reviewsCount ?? 0,
+              stars: d.starRating?.value ?? null,
+              price: priceInfo?.amountRounded ?? "",
+              currency: priceInfo?.currency ?? "",
+              isSoldOut: d.availabilityData?.isSoldOut ?? false,
+              propertyUrl: `https://www.booking.com/hotel/${d.location?.countryCode ?? "xx"}/${d.pageName}.html`,
+              pageName: d.pageName,
+              wishlistId: String(wl.listId),
+              wishlistName,
+            });
+          }
         }
       }
-
-      if (results.length > 0) return results;
     }
-  } catch {
-    // GraphQL failed — fall through to DOM extraction
+
+    if (results.length > 0) return results;
   }
 
-  // Fallback: DOM extraction from the rendered wishlist page
-  // The page renders property cards with names and links even without GraphQL
-  return page.evaluate((maxCount: number) => {
+  // Final fallback: DOM extraction from current page
+  return extractFromCurrentPage(page, "");
+}
+
+/** Extract properties from the currently loaded mywishlist page */
+async function extractFromCurrentPage(page: Page, wishlistNameOverride: string): Promise<SavedProperty[]> {
+  return page.evaluate((nameOverride: string) => {
     const results: Array<{
       name: string; location: string; rating: number | null; reviewCount: number;
       stars: number | null; price: string; currency: string; isSoldOut: boolean;
       propertyUrl: string; pageName: string; wishlistId: string; wishlistName: string;
     }> = [];
 
-    // Get current wishlist name from heading
-    const heading = document.querySelector("h1, h2, [class*='title'], [class*='heading']") as HTMLElement | null;
-    const wishlistName = heading?.innerText?.trim() ?? "My Wishlist";
+    // Get wishlist name from heading
+    const headings = Array.from(document.querySelectorAll("h1, h2, h3")) as HTMLElement[];
+    const heading = headings.find(h => h.innerText && h.innerText.trim().length > 1 && h.innerText.trim().length < 80);
+    const wishlistName = nameOverride || heading?.innerText?.trim() || "Saved";
 
-    // Find all property cards — look for hotel links
+    // Get current wl_id from URL
+    const urlMatch = window.location.href.match(/wl_id=(\d+)/);
+    const wishlistId = urlMatch?.[1] ?? "";
+
+    // Find all property card links
     const anchors = Array.from(document.querySelectorAll("a[href*='/hotel/']")) as HTMLAnchorElement[];
     const seen = new Set<string>();
 
     for (const anchor of anchors) {
-      if (results.length >= maxCount) break;
-      const href = anchor.href;
+      const href = anchor.href?.split("?")[0] ?? "";
       if (!href || seen.has(href)) continue;
 
-      // Skip navigation links — we want card links (they have text/images)
       const cardText = anchor.innerText?.trim();
       if (!cardText || cardText.length < 3) continue;
 
       seen.add(href);
 
-      // Walk up to find the card container
+      // Walk up to card container
       let el: HTMLElement = anchor;
       for (let i = 0; i < 6 && el.parentElement; i++) {
         el = el.parentElement as HTMLElement;
@@ -1042,40 +1125,26 @@ export async function extractSavedProperties(page: Page, count: number): Promise
       }
 
       const rawText = el.innerText?.trim() ?? "";
-
-      // Extract page name from URL: /hotel/{country}/{pagename}.html
-      const pageMatch = href.match(/\/hotel\/([a-z]{2})\/([^.?#]+)/);
+      const pageMatch = href.match(/\/hotel\/([a-z]{2})\/([^/]+)(?:\.html)?$/);
       const countryCode = pageMatch?.[1] ?? "";
       const pageName = pageMatch?.[2] ?? "";
 
-      // Rating
       const ratingMatch = rawText.match(/\b(8\.\d|9\.\d|10(?:\.0)?)\b/);
       const rating = ratingMatch ? parseFloat(ratingMatch[1] ?? "0") : null;
 
-      // Reviews
       const reviewMatch = rawText.match(/(\d[\d,]+)\s+(?:review|Rating)/i);
       const reviewCount = reviewMatch ? parseInt((reviewMatch[1] ?? "0").replace(/,/g, "")) : 0;
 
-      // Name: first meaningful line  
-      const name = rawText.split("\n").find(l => l.trim().length > 3 && l.trim().length < 100)?.trim() ?? "";
+      const name = rawText.split("\n").find((l: string) => l.trim().length > 3 && l.trim().length < 100)?.trim() ?? "";
 
       results.push({
-        name,
-        location: countryCode.toUpperCase(),
-        rating,
-        reviewCount,
-        stars: null,
-        price: "",
-        currency: "",
-        isSoldOut: false,
-        propertyUrl: href.split("?")[0] ?? href,
-        pageName,
-        wishlistId: "",
-        wishlistName,
+        name, location: countryCode.toUpperCase(), rating, reviewCount,
+        stars: null, price: "", currency: "", isSoldOut: false,
+        propertyUrl: href, pageName, wishlistId, wishlistName,
       });
     }
 
     return results;
-  }, count);
+  }, wishlistNameOverride);
 }
 
