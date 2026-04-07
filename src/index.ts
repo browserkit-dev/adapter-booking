@@ -49,10 +49,8 @@ export default defineAdapter({
       const hasLoginForm = await page.locator(SELECTORS.loginForm).count();
       if (hasLoginForm > 0) return false;
 
-      const bodyText = await page
-        .evaluate(() => document.body?.innerText?.trim() ?? "")
-        .catch(() => "");
-      return bodyText.length > 100;
+      // No account menu and no login form — default to not logged in.
+      return false;
     } catch {
       return false;
     }
