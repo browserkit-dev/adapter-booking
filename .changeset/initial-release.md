@@ -2,4 +2,4 @@
 "@browserkit-dev/adapter-booking": minor
 ---
 
-Initial public release.
+Initial public release of the adapter-booking browserkit adapter.
