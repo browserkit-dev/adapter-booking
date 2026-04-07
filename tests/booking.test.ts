@@ -40,12 +40,12 @@ describe("Booking adapter metadata", () => {
 // ── Tool registry ─────────────────────────────────────────────────────────────
 
 describe("tool registry", () => {
-  it("exposes all 3 Phase 1 tools", () => {
+  it("exposes all Phase 1 tools", () => {
     const names = adapter.tools().map((t) => t.name);
     expect(names).toContain("get_upcoming_bookings");
     expect(names).toContain("get_past_bookings");
     expect(names).toContain("get_booking_details");
-    expect(names).toHaveLength(7);
+    expect(names).toHaveLength(8);
   });
 
   it("every tool has a non-empty description", () => {
@@ -235,13 +235,13 @@ describe("SELECTORS export", () => {
 // ── Tool registry (Phase 2) ───────────────────────────────────────────────────
 
 describe("tool registry (Phase 2)", () => {
-  it("exposes all 7 tools (3 Phase 1 + 3 Phase 2 search + 1 saved)", () => {
+  it("exposes all 8 tools (3 Phase 1 + 3 Phase 2 search + 1 saved + 1 reviews)", () => {
     const names = adapter.tools().map((t) => t.name);
     expect(names).toContain("search_hotels");
     expect(names).toContain("get_property");
     expect(names).toContain("get_availability");
     expect(names).toContain("get_saved_properties");
-    expect(names).toHaveLength(7);
+    expect(names).toHaveLength(8);
   });
 });
 
