@@ -12,7 +12,7 @@
  * the running daemon and switch to watch mode automatically.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { createTestMcpClient, type TestMcpClient } from "@browserkit/core/testing";
+import { createTestMcpClient, type TestMcpClient } from "@browserkit-dev/core/testing";
 import type { Booking, BookingDetail } from "../src/scraper.js";
 
 // Connect to the running daemon (not a fresh test server — needs real auth)

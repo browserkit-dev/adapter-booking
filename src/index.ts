@@ -1,4 +1,4 @@
-import { defineAdapter } from "@browserkit/core";
+import { defineAdapter } from "@browserkit-dev/core";
 import { z } from "zod";
 import type { Page } from "patchright";
 import { SELECTORS } from "./selectors.js";

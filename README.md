@@ -1,4 +1,4 @@
-# @browserkit/adapter-booking
+# @browserkit-dev/adapter-booking
 
 [Booking.com](https://www.booking.com) adapter for [browserkit](https://github.com/browserkit-dev/browserkit) — access your reservations, past trips, and booking details via your authenticated local browser session.
 
@@ -17,16 +17,16 @@ Plus auto-registered management tools: `browser` (health check, screenshot, page
 ## Setup
 
 ```bash
-pnpm add @browserkit/adapter-booking
+pnpm add @browserkit-dev/adapter-booking
 ```
 
 ```js
 // browserkit.config.js
-import { defineConfig } from "@browserkit/core";
+import { defineConfig } from "@browserkit-dev/core";
 
 export default defineConfig({
   adapters: {
-    "@browserkit/adapter-booking": {
+    "@browserkit-dev/adapter-booking": {
       port: 3850,
       channel: "chrome",  // required — Booking.com uses Cloudflare bot detection
     },
