@@ -39,7 +39,7 @@ export const SELECTORS = {
 
   // Account menu — only present when logged in
   // Note: data-testid values can change — check after login if this needs updating
-  accountMenu: '[data-testid="account-menu"], [data-component="account-menu-button"], [aria-label*="Account"], [aria-label*="account"]',
+  accountMenu: '[data-testid="account-menu"], [data-component="account-menu-button"]',
 
   // Fallback: "Sign in" button in header (only appears when logged out)
   signInButton: 'a[href*="/login"], button[data-action*="login"]',
