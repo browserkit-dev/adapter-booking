@@ -21,6 +21,7 @@ const detailSchema = z.object({
 
 export default defineAdapter({
   site: "booking",
+  minCoreVersion: "0.1.0",
   domain: "booking.com",
   // www.booking.com is the only domain where captured session cookies work.
   // secure.booking.com requires a ?sid= query param that is embedded in the
