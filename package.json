@@ -21,7 +21,7 @@
     "@browserkit/core": ">=0.1.0"
   },
   "devDependencies": {
-    "@browserkit/core": "file:../session-mcp/packages/core",
+    "@browserkit/core": "^0.1.0",
     "@types/node": "^22.13.14",
     "patchright": "^1.51.1",
     "tsx": "^4.19.3",

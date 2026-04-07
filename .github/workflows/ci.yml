@@ -13,47 +13,20 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: adapter-booking
-
-      - uses: actions/checkout@v4
-        with:
-          repository: browserkit-dev/browserkit
-          path: browserkit
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install & build @browserkit/core
-        working-directory: browserkit
-        run: |
-          npm install -g pnpm
-          pnpm install --frozen-lockfile
-          pnpm --filter @browserkit/core build
-
-      - name: Patch @browserkit/core dep path
-        working-directory: adapter-booking
-        run: |
-          npm pkg set 'devDependencies.@browserkit/core'='file:../browserkit/packages/core'
-          npm pkg set 'peerDependencies.@browserkit/core'='>=0.1.0'
-
-      - name: Install adapter dependencies
-        working-directory: adapter-booking
+      - name: Install dependencies
         run: npm install
 
       - name: Install Patchright Chromium
-        working-directory: adapter-booking
         run: npx patchright install chromium --with-deps
 
       - name: Build
-        working-directory: adapter-booking
         run: npm run build
 
-      # L1 unit + L3 structural protocol tests only — no Booking.com network calls.
-      # Integration tests require a real authenticated session and real Chrome
-      # (channel: "chrome") — run locally with: pnpm test:integration
       - name: Test
-        working-directory: adapter-booking
         run: npm test
-        timeout-minutes: 5
+        timeout-minutes: 10
