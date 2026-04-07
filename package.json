@@ -43,5 +43,9 @@
   "files": [
     "dist",
     "README.md"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/browserkit-dev/adapter-booking"
+  }
 }
